@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Juego de NONI: Asteroids Edition</title>
+    <style>
+        body {
+            margin: 0;
+            height: 100vh;
+            background: #111;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            touch-action: none;
+        }
+        canvas {
+            border: 1px solid black;
+            background: #000;
+            max-width: 100%;
+            max-height: 100%;
+        }
+        #joystick, #shootButton, #pauseButton, #startButton {
+            position: absolute;
+            border-radius: 50%;
+        }
+        #joystick {
+            bottom: 20px;
+            left: 20px;
+            width: 100px;
+            height: 100px;
+            background: rgba(255, 255, 255, 0.3);
+            display: none;
+        }
+        #joystickKnob {
+            position: absolute;
+            width: 40px;
+            height: 40px;
+            background: rgba(255, 255, 255, 0.8);
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            left: 50%;
+            top: 50%;
+        }
+        #shootButton {
+            bottom: 20px;
+            right: 20px;
+            width: 60px;
+            height: 60px;
+            background: rgba(255, 0, 0, 0.7);
+        }
+        #pauseButton {
+            top: 20px;
+            right: 20px;
+            width: 40px;
+            height: 40px;
+            background: rgba(0, 255, 0, 0.7);
+        }
+        #startButton {
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 100px;
+            height: 100px;
+            background: rgba(0, 255, 255, 0.7);
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <div id="joystick"><div id="joystickKnob"></div></div>
+    <div id="shootButton"></div>
+    <div id="pauseButton"></div>
+    <div id="startButton"></div>
+
+    <audio id="bgMusic" loop><source src="cancion.mp3" type="audio/mpeg"></audio>
+    <audio id="leideSound"><source src="leide.mp3" type="audio/mpeg"></audio>
+    <audio id="gameOverSound"><source src="juegazo.mp3" type="audio/mpeg"></audio>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const bgMusic = document.getElementById('bgMusic');
+        const leideSound = document.getElementById('leideSound');
+        const gameOverSound = document.getElementById('gameOverSound');
+        const joystick = document.getElementById('joystick');
+        const joystickKnob = document.getElementById('joystickKnob');
+        const shootButton = document.getElementById('shootButton');
+        const pauseButton = document.getElementById('pauseButton');
+        const startButton = document.getElementById('startButton');
+
+        let scale = 1, time = 0, score = 0, highScore = parseInt(localStorage.getItem('noniHighScore')) || 0;
+        let musicStarted = false, gameOver = false, paused = false, gameStarted = false, speedMultiplier = 1;
+        let touchJoystick = false, touchShoot = false, joystickX = 0, joystickY = 0, dx = 0, dy = 0;
+        const entities = { bullets: [], asteroids: [] };
+        const keys = {};
+
+        let ship = { x: 0, y: 0, angle: 0, speed: 0, width: 50, height: 50 };
+
+        // Cargar imágenes
+        const loadImage = src => new Promise((resolve, reject) => {
+            const img = new Image();
+            img.src = src;
+            img.onload = () => resolve(img);
+            img.onerror = () => reject(new Error(`No se pudo cargar ${src}`));
+        });
+
+        let images = {};
+        Promise.all([
+            loadImage('noni.png'),
+            loadImage('pol.png'),
+            loadImage('vaca.png'), // Reincorporada para las vacas giratorias
+            loadImage('axozer.png')
+        ]).then(([shipImg, asteroidImg, cowImg, axozerImg]) => {
+            images = { ship: shipImg, asteroid: asteroidImg, cow: cowImg, axozer: axozerImg };
+            update();
+        }).catch(err => {
+            console.error(err);
+            drawText('Error cargando recursos', canvas.width / 2, canvas.height / 2, 'white', 30);
+        });
+
+        // Ajustar canvas
+        function resizeCanvas() {
+            const aspectRatio = 16 / 9;
+            let w = window.innerWidth * 0.9, h = window.innerHeight * 0.9;
+            if (w / h > aspectRatio) w = h * aspectRatio;
+            else h = w / aspectRatio;
+
+            canvas.width = w;
+            canvas.height = h;
+            scale = w / 1280;
+
+            ship.width = 50 * scale;
+            ship.height = 50 * scale;
+            if (!gameOver) {
+                ship.x = w / 2;
+                ship.y = h / 2;
+            }
+
+            joystick.style.width = `${100 * scale}px`;
+            joystick.style.height = `${100 * scale}px`;
+            joystickKnob.style.width = `${40 * scale}px`;
+            joystickKnob.style.height = `${40 * scale}px`;
+            shootButton.style.width = `${60 * scale}px`;
+            shootButton.style.height = `${60 * scale}px`;
+            pauseButton.style.width = `${40 * scale}px`;
+            pauseButton.style.height = `${40 * scale}px`;
+            startButton.style.width = `${100 * scale}px`;
+            startButton.style.height = `${100 * scale}px`;
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // Controles
+        document.addEventListener('keydown', e => {
+            keys[e.key] = true;
+            if (e.key === 'p' || e.key === 'P' && !gameOver) togglePause();
+        });
+        document.addEventListener('keyup', e => keys[e.key] = false);
+
+        function startMusic() {
+            if (!musicStarted) {
+                bgMusic.play().then(() => musicStarted = true).catch(err => console.log("Error música:", err));
+            }
+        }
+
+        canvas.addEventListener('click', startMusic);
+        startButton.addEventListener('click', () => {
+            startMusic();
+            if (!gameStarted) {
+                gameStarted = true;
+                startButton.style.display = 'none';
+            }
+        });
+
+        canvas.addEventListener('touchstart', e => {
+            e.preventDefault();
+            startMusic();
+            Array.from(e.changedTouches).forEach(t => {
+                const x = t.clientX, y = t.clientY;
+                if (x < canvas.width / 2 && y > canvas.height / 2) {
+                    touchJoystick = true;
+                    joystickX = x;
+                    joystickY = y;
+                    joystick.style.left = `${x}px`;
+                    joystick.style.top = `${y}px`;
+                    joystick.style.display = 'block';
+                } else if (x > canvas.width / 2 && y > canvas.height / 2) {
+                    touchShoot = true;
+                } else if (x > canvas.width - 60 * scale && y < 60 * scale && !gameOver) {
+                    togglePause();
+                }
+            });
+        });
+
+        canvas.addEventListener('touchmove', e => {
+            e.preventDefault();
+            if (touchJoystick) {
+                const t = e.touches[0];
+                dx = t.clientX - joystickX;
+                dy = t.clientY - joystickY;
+                const max = 50 * scale;
+                const dist = Math.min(Math.hypot(dx, dy), max);
+                const angle = Math.atan2(dy, dx);
+                joystickKnob.style.left = `${50 + (Math.cos(angle) * dist / max) * 50}%`;
+                joystickKnob.style.top = `${50 + (Math.sin(angle) * dist / max) * 50}%`;
+            }
+        });
+
+        canvas.addEventListener('touchend', e => {
+            e.preventDefault();
+            Array.from(e.changedTouches).forEach(t => {
+                if (t.clientX < canvas.width / 2 && touchJoystick) {
+                    touchJoystick = false;
+                    joystick.style.display = 'none';
+                    dx = dy = 0;
+                } else if (t.clientX > canvas.width / 2) {
+                    touchShoot = false;
+                }
+            });
+        });
+
+        // Funciones de juego
+        function spawnAsteroid() {
+            const isSpecial = Math.random() < 0.1;
+            const size = isSpecial ? 100 * scale : (50 + Math.random() * 50) * scale;
+            const edge = Math.floor(Math.random() * 4);
+            let x, y;
+            if (edge === 0) { x = Math.random() * canvas.width; y = -size; }
+            else if (edge === 1) { x = canvas.width + size; y = Math.random() * canvas.height; }
+            else if (edge === 2) { x = Math.random() * canvas.width; y = canvas.height + size; }
+            else { x = -size; y = Math.random() * canvas.height; }
+
+            entities.asteroids.push({
+                x, y,
+                dx: (Math.random() - 0.5) * 3 * speedMultiplier * scale,
+                dy: (Math.random() - 0.5) * 3 * speedMultiplier * scale,
+                size,
+                isSpecial
+            });
+        }
+
+        function shoot() {
+            if (!entities.bullets.length) {
+                entities.bullets.push({
+                    x: ship.x + Math.cos(ship.angle) * 25 * scale,
+                    y: ship.y + Math.sin(ship.angle) * 25 * scale,
+                    dx: Math.cos(ship.angle) * 5 * speedMultiplier * scale,
+                    dy: Math.sin(ship.angle) * 5 * speedMultiplier * scale
+                });
+            }
+        }
+
+        function drawRainbowBackground() {
+            time += 0.005 * speedMultiplier;
+            const gradient = ctx.createRadialGradient(canvas.width / 2, canvas.height / 2, 0, canvas.width / 2, canvas.height / 2, canvas.width);
+            gradient.addColorStop(0, `hsl(${Math.sin(time) * 360}, 100%, 25%)`);
+            gradient.addColorStop(0.3, `hsl(${Math.cos(time) * 360}, 100%, 25%)`);
+            gradient.addColorStop(0.6, `hsl(${Math.sin(time + 1) * 360}, 100%, 25%)`);
+            gradient.addColorStop(1, `hsl(${Math.cos(time + 1) * 360}, 100%, 25%)`);
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+
+        // Reincorporar vacas giratorias optimizadas
+        function drawSpinningCows() {
+            ctx.globalAlpha = 0.3;
+            for (let i = 0; i < 8; i++) {
+                const angle = (time * 0.05 * speedMultiplier) + (i * Math.PI / 4); // 8 vacas, espaciadas en 45°
+                const x = canvas.width / 2 + 300 * scale * Math.cos(angle);
+                const y = canvas.height / 2 + 300 * scale * Math.sin(angle);
+                ctx.save();
+                ctx.translate(x, y);
+                ctx.rotate(angle);
+                ctx.drawImage(images.cow || images.asteroid, -50 * scale, -50 * scale, 100 * scale, 100 * scale);
+                ctx.restore();
+            }
+            ctx.globalAlpha = 1;
+        }
+
+        function drawText(text, x, y, color, size, align = 'center') {
+            ctx.fillStyle = color;
+            ctx.font = `${size * scale}px Arial`;
+            ctx.textAlign = align;
+            ctx.fillText(text, x, y);
+        }
+
+        function updateHighScore() {
+            if (score > highScore) {
+                highScore = score;
+                localStorage.setItem('noniHighScore', highScore);
+            }
+        }
+
+        function togglePause() {
+            paused = !paused;
+            if (!paused && musicStarted) bgMusic.play();
+            else if (paused && musicStarted) bgMusic.pause();
+        }
+
+        function resetGame() {
+            updateHighScore();
+            gameOver = false;
+            score = 0;
+            speedMultiplier = 1;
+            entities.bullets = [];
+            entities.asteroids = [];
+            ship = { x: canvas.width / 2, y: canvas.height / 2, angle: 0, speed: 0, width: 50 * scale, height: 50 * scale };
+            for (let i = 0; i < 5; i++) spawnAsteroid();
+            startButton.style.display = 'none';
+        }
+
+        function update() {
+            ctx.fillStyle = 'black';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            if (!images.ship || !images.asteroid || !images.cow || !images.axozer) {
+                drawText('Cargando recursos...', canvas.width / 2, canvas.height / 2, 'white', 30);
+                requestAnimationFrame(update);
+                return;
+            }
+
+            if (!gameStarted) {
+                startButton.style.display = 'block';
+                drawText('Toca o haz clic para empezar', canvas.width / 2, canvas.height / 2 - 50 * scale, 'white', 30);
+                requestAnimationFrame(update);
+                return;
+            }
+
+            if (!gameOver && !paused) {
+                if (keys['ArrowLeft']) ship.angle -= 0.1;
+                if (keys['ArrowRight']) ship.angle += 0.1;
+                if (keys['ArrowUp']) {
+                    ship.speed = 3;
+                    ship.dx = Math.cos(ship.angle) * ship.speed;
+                    ship.dy = Math.sin(ship.angle) * ship.speed;
+                } else {
+                    ship.speed = 0;
+                }
+                if (keys[' ']) shoot();
+
+                if (touchJoystick) {
+                    const max = 50 * scale;
+                    const dist = Math.min(Math.hypot(dx, dy), max);
+                    ship.angle = Math.atan2(dy, dx);
+                    ship.speed = 3 * (dist / max);
+                    ship.dx = Math.cos(ship.angle) * ship.speed;
+                    ship.dy = Math.sin(ship.angle) * ship.speed;
+                }
+                if (touchShoot) shoot();
+
+                ship.x += ship.dx || 0;
+                ship.y += ship.dy || 0;
+                if (ship.x < 0) ship.x = canvas.width;
+                if (ship.x > canvas.width) ship.x = 0;
+                if (ship.y < 0) ship.y = canvas.height;
+                if (ship.y > canvas.height) ship.y = 0;
+
+                entities.bullets.forEach((b, i) => {
+                    b.x += b.dx;
+                    b.y += b.dy;
+                    if (b.x < 0 || b.x > canvas.width || b.y < 0 || b.y > canvas.height) entities.bullets.splice(i, 1);
+                });
+
+                if (Math.random() < 0.026) spawnAsteroid();
+                entities.asteroids.forEach((a, i) => {
+                    a.x += a.dx;
+                    a.y += a.dy;
+                    if (a.x < -a.size || a.x > canvas.width + a.size || a.y < -a.size || a.y > canvas.height + a.size) {
+                        entities.asteroids.splice(i, 1);
+                        return;
+                    }
+
+                    entities.bullets.forEach((b, j) => {
+                        if (Math.hypot(b.x - a.x, b.y - a.y) < a.size / 2) {
+                            leideSound.play();
+                            score += 10;
+                            entities.bullets.splice(j, 1);
+                            entities.asteroids.splice(i, 1);
+                            if (score % 10 === 0) speedMultiplier *= 1.2;
+                            return;
+                        }
+                    });
+
+                    if (Math.hypot(ship.x - a.x, ship.y - a.y) < (ship.width / 2 + a.size / 2)) {
+                        gameOver = true;
+                        gameOverSound.play();
+                        setTimeout(() => {
+                            resetGame();
+                            gameStarted = false;
+                            startButton.style.display = 'block';
+                        }, 3000);
+                    }
+                });
+            }
+
+            drawRainbowBackground();
+            drawSpinningCows(); // Restauradas las vacas giratorias
+
+            if (ship.speed > 0 && !gameOver && !paused) {
+                ctx.save();
+                ctx.translate(ship.x, ship.y);
+                ctx.rotate(ship.angle);
+                ctx.fillStyle = 'rgba(255, 100, 0, 0.7)';
+                ctx.beginPath();
+                ctx.moveTo(-ship.width / 2 - 10 * scale, 0);
+                ctx.lineTo(-ship.width / 2, -5 * scale);
+                ctx.lineTo(-ship.width / 2, 5 * scale);
+                ctx.fill();
+                ctx.restore();
+            }
+
+            ctx.save();
+            ctx.translate(ship.x, ship.y);
+            ctx.rotate(ship.angle);
+            ctx.drawImage(images.ship, -ship.width / 2, -ship.height / 2, gameOver ? canvas.width : ship.width, gameOver ? canvas.height : ship.height);
+            ctx.restore();
+
+            entities.bullets.forEach(b => drawText('LEIDE', b.x, b.y, 'white', 16));
+            entities.asteroids.forEach(a => ctx.drawImage(a.isSpecial ? images.axozer : images.asteroid, a.x - a.size / 2, a.y - a.size / 2, a.size, a.size));
+
+            const textSize = Math.min(20 * scale, 30);
+            drawText(`Puntuación: ${score}`, 10, 20, 'white', textSize, 'left');
+            drawText(`Récord: ${highScore}`, 10, 40, 'white', textSize, 'left');
+            if (gameOver) {
+                drawText('ERES UN NONITO', canvas.width / 2, canvas.height / 2 - 30 * scale, 'red', 40);
+                drawText('LAMENTABLE', canvas.width / 2, canvas.height / 2 + 30 * scale, 'red', 40);
+            }
+
+            requestAnimationFrame(update);
+        }
+
+        for (let i = 0; i < 5; i++) spawnAsteroid();
+    </script>
+</body>
+</html>
