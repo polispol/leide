@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Juego de NONI: Asteroids Edition</title>
+    <style>
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background: #111;
+            overflow: hidden;
+        }
+        canvas {
+            border: 1px solid black;
+            background: #000;
+            max-width: 100%;
+            max-height: 100%;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+
+    <!-- Audio de fondo -->
+    <audio id="backgroundMusic" loop>
+        <source src="cancion.mp3" type="audio/mpeg">
+    </audio>
+
+    <!-- Audio del impacto -->
+    <audio id="leideSound">
+        <source src="leide.mp3" type="audio/mpeg">
+    </audio>
+
+    <!-- Audio de fin de juego -->
+    <audio id="gameOverSound">
+        <source src="juegazo.mp3" type="audio/mpeg">
+    </audio>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const bgMusic = document.getElementById('backgroundMusic');
+        const leideSound = document.getElementById('leideSound');
+        const gameOverSound = document.getElementById('gameOverSound');
+        let musicStarted = false;
+        let score = 0;
+        let particles = [];
+        let explosions = [];
+        let powerUps = [];
+        let time = 0;
+        let gameOver = false;
+        let paused = false;
+        let speedMultiplier = 1;
+        let lastAsteroidTime = 0;
+        let comboCount = 0;
+        let shakeTime = 0;
+
+        // Escala inicial
+        let scale = 1;
+
+        // Definir ship antes de cualquier función
+        let ship = {
+            x: 0, // Se ajustará en resizeCanvas
+            y: 0,
+            angle: 0,
+            speed: 0,
+            width: 50,
+            height: 50,
+            powerUp: null,
+            powerUpTimer: 0
+        };
+
+        let bullets = [];
+        let asteroids = [];
+        let keys = {};
+
+        // Ajustar canvas al tamaño de la ventana con proporción 16:9
+        function resizeCanvas() {
+            const aspectRatio = 16 / 9;
+            let width = window.innerWidth * 0.9;
+            let height = window.innerHeight * 0.9;
+
+            if (width / height > aspectRatio) {
+                width = height * aspectRatio;
+            } else {
+                height = width / aspectRatio;
+            }
+
+            canvas.width = width;
+            canvas.height = height;
+            scale = width / 1280;
+
+            // Ajustar tamaños y posiciones con la escala
+            ship.width = 50 * scale;
+            ship.height = 50 * scale;
+            if (!gameOver) {
+                ship.x = canvas.width / 2;
+                ship.y = canvas.height / 2;
+            }
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas(); // Configurar tamaño inicial
+
+        // Cargar recursos con promesas
+        const loadImage = (src) => {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.src = src;
+                img.onload = () => resolve(img);
+                img.onerror = () => reject(new Error(`No se pudo cargar ${src}`));
+            });
+        };
+
+        let noniShip, polAsteroid, cowImage;
+        Promise.all([
+            loadImage('noni.png'),
+            loadImage('pol.png'),
+            loadImage('vaca.png')
+        ]).then(([shipImg, asteroidImg, cowImg]) => {
+            noniShip = shipImg;
+            polAsteroid = asteroidImg;
+            cowImage = cowImg;
+            update(); // Iniciar el juego cuando las imágenes estén cargadas
+        }).catch(err => {
+            console.error(err);
+            ctx.fillStyle = 'white';
+            ctx.font = '30px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('Error cargando recursos', canvas.width / 2, canvas.height / 2);
+        });
+
+        // Controles
+        document.addEventListener('keydown', (e) => {
+            keys[e.key] = true;
+            if (e.key === 'p' || e.key === 'P') {
+                if (!gameOver) {
+                    paused = !paused;
+                    if (!paused && musicStarted) bgMusic.play();
+                    else if (paused && musicStarted) bgMusic.pause();
+                }
+            }
+        });
+        document.addEventListener('keyup', (e) => keys[e.key] = false);
+
+        // Iniciar música con interacción
+        canvas.addEventListener('click', () => {
+            if (!musicStarted) {
+                bgMusic.play().then(() => {
+                    musicStarted = true;
+                }).catch(error => {
+                    console.log("Error al reproducir la música: ", error);
+                });
+            }
+        });
+
+        // Crear partículas
+        function createParticles(x, y) {
+            for (let i = 0; i < 10; i++) {
+                particles.push({
+                    x: x,
+                    y: y,
+                    dx: (Math.random() - 0.5) * 4 * speedMultiplier * scale,
+                    dy: (Math.random() - 0.5) * 4 * speedMultiplier * scale,
+                    life: 30,
+                    size: (Math.random() * 3 + 1) * scale
+                });
+            }
+        }
+
+        // Crear explosión
+        function createExplosion(x, y) {
+            explosions.push({
+                x: x,
+                y: y,
+                radius: 10 * scale,
+                maxRadius: 40 * scale,
+                life: 20
+            });
+        }
+
+        // Crear power-up
+        function spawnPowerUp(x, y) {
+            const type = Math.random() < 0.5 ? 'rapidFire' : 'shield';
+            powerUps.push({
+                x: x,
+                y: y,
+                type: type,
+                size: 20 * scale
+            });
+        }
+
+        // Crear asteroides
+        function spawnAsteroid() {
+            const isSpecial = Math.random() < 0.1;
+            const size = isSpecial ? 100 * scale : (50 + Math.random() * 50) * scale;
+            const edge = Math.floor(Math.random() * 4);
+            let x, y;
+            if (edge === 0) { x = Math.random() * canvas.width; y = -size; }
+            else if (edge === 1) { x = canvas.width + size; y = Math.random() * canvas.height; }
+            else if (edge === 2) { x = Math.random() * canvas.width; y = canvas.height + size; }
+            else { x = -size; y = Math.random() * canvas.height; }
+
+            asteroids.push({
+                x, y,
+                dx: (Math.random() - 0.5) * 3 * speedMultiplier * scale,
+                dy: (Math.random() - 0.5) * 3 * speedMultiplier * scale,
+                size,
+                isSpecial: isSpecial
+            });
+        }
+
+        // Disparar balas (LEIDE)
+        function shoot() {
+            const rapidFireActive = ship.powerUp === 'rapidFire' && ship.powerUpTimer > 0;
+            if (bullets.length === 0 || rapidFireActive) {
+                bullets.push({
+                    x: ship.x + Math.cos(ship.angle) * 25 * scale,
+                    y: ship.y + Math.sin(ship.angle) * 25 * scale,
+                    dx: Math.cos(ship.angle) * 5 * speedMultiplier * scale,
+                    dy: Math.sin(ship.angle) * 5 * speedMultiplier * scale
+                });
+            }
+        }
+
+        // Fondo psicodélico de arcoíris
+        function drawRainbowBackground() {
+            time += 0.05 * speedMultiplier;
+            const gradient = ctx.createRadialGradient(
+                canvas.width / 2, canvas.height / 2, 0,
+                canvas.width / 2, canvas.height / 2, canvas.width
+            );
+            gradient.addColorStop(0, `hsl(${Math.sin(time) * 360}, 100%, 25%)`);
+            gradient.addColorStop(0.3, `hsl(${Math.cos(time) * 360}, 100%, 25%)`);
+            gradient.addColorStop(0.6, `hsl(${Math.sin(time + 1) * 360}, 100%, 25%)`);
+            gradient.addColorStop(1, `hsl(${Math.cos(time + 1) * 360}, 100%, 25%)`);
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+
+        // Dibujar vacas giratorias
+        function drawSpinningCows() {
+            const cowCount = 8;
+            const radius = 300 * scale;
+            ctx.globalAlpha = 0.3;
+
+            for (let i = 0; i < cowCount; i++) {
+                const angle = (time * 0.05 * speedMultiplier) + (i * (2 * Math.PI / cowCount));
+                const x = canvas.width / 2 + radius * Math.cos(angle);
+                const y = canvas.height / 2 + radius * Math.sin(angle);
+
+                ctx.save();
+                ctx.translate(x, y);
+                ctx.rotate(angle);
+                ctx.drawImage(cowImage || polAsteroid, -50 * scale, -50 * scale, 100 * scale, 100 * scale);
+                ctx.restore();
+            }
+            ctx.globalAlpha = 1.0;
+        }
+
+        // Dibujar power-ups
+        function drawPowerUps() {
+            powerUps.forEach(powerUp => {
+                ctx.fillStyle = powerUp.type === 'rapidFire' ? 'yellow' : 'cyan';
+                ctx.beginPath();
+                ctx.arc(powerUp.x, powerUp.y, powerUp.size / 2, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        // Aplicar sacudida de pantalla
+        function applyScreenShake() {
+            if (shakeTime > 0) {
+                const shakeX = (Math.random() - 0.5) * 10 * scale;
+                const shakeY = (Math.random() - 0.5) * 10 * scale;
+                ctx.translate(shakeX, shakeY);
+                shakeTime--;
+            }
+        }
+
+        // Reiniciar juego
+        function resetGame() {
+            gameOver = false;
+            score = 0;
+            speedMultiplier = 1;
+            bullets = [];
+            asteroids = [];
+            particles = [];
+            explosions = [];
+            powerUps = [];
+            comboCount = 0;
+            lastAsteroidTime = 0;
+            ship.x = canvas.width / 2;
+            ship.y = canvas.height / 2;
+            ship.angle = 0;
+            ship.speed = 0;
+            ship.width = 50 * scale;
+            ship.height = 50 * scale;
+            ship.powerUp = null;
+            ship.powerUpTimer = 0;
+            for (let i = 0; i < 5; i++) spawnAsteroid();
+        }
+
+        // Bucle del juego
+        function update() {
+            ctx.fillStyle = 'black';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            if (!noniShip || !polAsteroid || !cowImage) {
+                ctx.fillStyle = 'white';
+                ctx.font = `${30 * scale}px Arial`;
+                ctx.textAlign = 'center';
+                ctx.fillText('Cargando recursos...', canvas.width / 2, canvas.height / 2);
+                requestAnimationFrame(update);
+                return;
+            }
+
+            if (!gameOver && !paused) {
+                if (ship.powerUpTimer > 0) {
+                    ship.powerUpTimer--;
+                    if (ship.powerUpTimer <= 0) ship.powerUp = null;
+                }
+
+                if (keys['ArrowLeft']) ship.angle -= 0.1;
+                if (keys['ArrowRight']) ship.angle += 0.1;
+                if (keys['ArrowUp']) {
+                    ship.speed = 3;
+                    ship.dx = Math.cos(ship.angle) * ship.speed;
+                    ship.dy = Math.sin(ship.angle) * ship.speed;
+                } else {
+                    ship.speed = 0;
+                }
+                if (keys[' '] || (ship.powerUp === 'rapidFire' && ship.powerUpTimer > 0)) shoot();
+
+                ship.x += ship.dx || 0;
+                ship.y += ship.dy || 0;
+                if (ship.x < 0) ship.x = canvas.width;
+                if (ship.x > canvas.width) ship.x = 0;
+                if (ship.y < 0) ship.y = canvas.height;
+                if (ship.y > canvas.height) ship.y = 0;
+
+                bullets.forEach((bullet, i) => {
+                    bullet.x += bullet.dx;
+                    bullet.y += bullet.dy;
+                    if (bullet.x < 0 || bullet.x > canvas.width || bullet.y < 0 || bullet.y > canvas.height) {
+                        bullets.splice(i, 1);
+                    }
+                });
+
+                if (Math.random() < 0.026) spawnAsteroid();
+                asteroids.forEach((asteroid, i) => {
+                    asteroid.x += asteroid.dx;
+                    asteroid.y += asteroid.dy;
+                    if (asteroid.x < -asteroid.size || asteroid.x > canvas.width + asteroid.size ||
+                        asteroid.y < -asteroid.size || asteroid.y > canvas.height + asteroid.size) {
+                        asteroids.splice(i, 1);
+                    }
+
+                    bullets.forEach((bullet, j) => {
+                        if (Math.hypot(bullet.x - asteroid.x, bullet.y - asteroid.y) < asteroid.size / 2) {
+                            leideSound.play();
+                            const now = Date.now();
+                            if (now - lastAsteroidTime < 1000) {
+                                comboCount++;
+                                score += 10 + comboCount * 5;
+                            } else {
+                                comboCount = 0;
+                                score += 10;
+                            }
+                            lastAsteroidTime = now;
+
+                            if (asteroid.isSpecial) {
+                                shakeTime = 10;
+                                for (let k = 0; k < 3; k++) {
+                                    asteroids.push({
+                                        x: asteroid.x,
+                                        y: asteroid.y,
+                                        dx: (Math.random() - 0.5) * 4 * speedMultiplier * scale,
+                                        dy: (Math.random() - 0.5) * 4 * speedMultiplier * scale,
+                                        size: asteroid.size / 2,
+                                        isSpecial: false
+                                    });
+                                }
+                            }
+
+                            createParticles(asteroid.x, asteroid.y);
+                            createExplosion(asteroid.x, asteroid.y);
+                            if (Math.random() < 0.2) spawnPowerUp(asteroid.x, asteroid.y);
+                            asteroids.splice(i, 1);
+                            bullets.splice(j, 1);
+
+                            if (score % 10 === 0) {
+                                speedMultiplier *= 1.2;
+                            }
+                        }
+                    });
+
+                    if (Math.hypot(ship.x - asteroid.x, ship.y - asteroid.y) < (ship.width / 2 + asteroid.size / 2)) {
+                        if (ship.powerUp === 'shield' && ship.powerUpTimer > 0) {
+                            asteroids.splice(i, 1);
+                            shakeTime = 5;
+                        } else {
+                            gameOver = true;
+                            gameOverSound.play();
+                            shakeTime = 15;
+                            setTimeout(resetGame, 3000);
+                        }
+                    }
+                });
+
+                powerUps.forEach((powerUp, i) => {
+                    if (Math.hypot(ship.x - powerUp.x, ship.y - powerUp.y) < (ship.width / 2 + powerUp.size / 2)) {
+                        ship.powerUp = powerUp.type;
+                        ship.powerUpTimer = 300;
+                        powerUps.splice(i, 1);
+                    }
+                });
+
+                particles.forEach((particle, i) => {
+                    particle.x += particle.dx;
+                    particle.y += particle.dy;
+                    particle.life--;
+                    if (particle.life <= 0) particles.splice(i, 1);
+                });
+
+                explosions.forEach((explosion, i) => {
+                    explosion.radius += (explosion.maxRadius - explosion.radius) * 0.1;
+                    explosion.life--;
+                    if (explosion.life <= 0) explosions.splice(i, 1);
+                });
+            }
+
+            ctx.save();
+            applyScreenShake();
+            drawRainbowBackground();
+            drawSpinningCows();
+            drawPowerUps();
+
+            if (!musicStarted) {
+                ctx.fillStyle = 'white';
+                ctx.font = `${30 * scale}px Arial`;
+                ctx.textAlign = 'center';
+                ctx.fillText('Haz clic para empezar la música', canvas.width / 2, canvas.height / 2);
+            }
+
+            if (ship.speed > 0 && !gameOver && !paused) {
+                ctx.save();
+                ctx.translate(ship.x, ship.y);
+                ctx.rotate(ship.angle);
+                ctx.fillStyle = 'rgba(255, 100, 0, 0.7)';
+                ctx.beginPath();
+                ctx.moveTo(-ship.width / 2 - 10 * scale, 0);
+                ctx.lineTo(-ship.width / 2, -5 * scale);
+                ctx.lineTo(-ship.width / 2, 5 * scale);
+                ctx.fill();
+                ctx.restore();
+            }
+
+            if (!gameOver) {
+                ctx.save();
+                ctx.translate(ship.x, ship.y);
+                ctx.rotate(ship.angle);
+                ctx.drawImage(noniShip, -ship.width / 2, -ship.height / 2, ship.width, ship.height);
+                if (ship.powerUp === 'shield' && ship.powerUpTimer > 0) {
+                    ctx.strokeStyle = 'cyan';
+                    ctx.lineWidth = 2 * scale;
+                    ctx.beginPath();
+                    ctx.arc(0, 0, ship.width * 0.7, 0, Math.PI * 2);
+                    ctx.stroke();
+                }
+                ctx.restore();
+            } else {
+                ctx.save();
+                ctx.translate(ship.x, ship.y);
+                ctx.rotate(ship.angle);
+                ctx.drawImage(noniShip, -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
+                ctx.restore();
+            }
+
+            bullets.forEach(bullet => {
+                ctx.fillStyle = 'white';
+                ctx.font = `${16 * scale}px Arial`;
+                ctx.fillText('LEIDE', bullet.x, bullet.y);
+            });
+
+            asteroids.forEach(asteroid => {
+                ctx.save();
+                if (asteroid.isSpecial) {
+                    ctx.filter = 'hue-rotate(90deg)';
+                }
+                ctx.drawImage(polAsteroid, asteroid.x - asteroid.size / 2, asteroid.y - asteroid.size / 2, asteroid.size, asteroid.size);
+                ctx.restore();
+            });
+
+            particles.forEach(particle => {
+                ctx.fillStyle = 'rgba(255, 255, 255, ' + (particle.life / 30) + ')';
+                ctx.beginPath();
+                ctx.arc(particle.x, particle.y, particle.size, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            explosions.forEach(explosion => {
+                ctx.beginPath();
+                ctx.arc(explosion.x, explosion.y, explosion.radius, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(255, 150, 0, ${explosion.life / 20})`;
+                ctx.fill();
+            });
+
+            ctx.fillStyle = 'white';
+            ctx.font = `${20 * scale}px Arial`;
+            ctx.textAlign = 'left';
+            ctx.fillText(`Puntuación: ${score}`, 10 * scale, 30 * scale);
+            if (comboCount > 1) {
+                ctx.fillStyle = 'yellow';
+                ctx.textAlign = 'right';
+                ctx.fillText(`Combo x${comboCount}`, canvas.width - 10 * scale, 30 * scale);
+            }
+
+            if (gameOver) {
+                ctx.fillStyle = 'red';
+                ctx.font = `${40 * scale}px Arial`;
+                ctx.textAlign = 'center';
+                ctx.fillText('ERES UN NONITO', canvas.width / 2, canvas.height / 2 - 30 * scale);
+                ctx.fillText('LAMENTABLE', canvas.width / 2, canvas.height / 2 + 30 * scale);
+            }
+
+            if (paused && !gameOver) {
+                ctx.fillStyle = 'white';
+                ctx.font = `${40 * scale}px Arial`;
+                ctx.textAlign = 'center';
+                ctx.fillText('PAUSADO', canvas.width / 2, canvas.height / 2);
+            }
+
+            ctx.restore();
+            requestAnimationFrame(update);
+        }
+
+        // Iniciar juego con asteroides básicos
+        for (let i = 0; i < 5; i++) spawnAsteroid();
+    </script>
+</body>
+</html>
